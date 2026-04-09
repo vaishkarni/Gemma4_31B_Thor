@@ -1,11 +1,11 @@
 #!/bin/bash
 
-set -e  # Exit on error
+set -e
 
-echo "🚀 Starting Gemma 4 setup on Jetson Thor..."
+echo "🚀 Jetson Thor Gemma 4 Setup Starting..."
 
 # -------------------------------
-# Config
+# CONFIG
 # -------------------------------
 HF_CACHE_DIR="$HOME/.cache/huggingface"
 WEBUI_DATA_DIR="$HOME/open-webui"
@@ -13,70 +13,111 @@ WEBUI_DATA_DIR="$HOME/open-webui"
 LLAMA_IMAGE="ghcr.io/nvidia-ai-iot/llama_cpp:gemma4-jetson-thor"
 WEBUI_IMAGE="ghcr.io/open-webui/open-webui:main"
 
-LLAMA_CONTAINER_NAME="gemma4-server"
-WEBUI_CONTAINER_NAME="open-webui"
+LLAMA_CONTAINER="gemma4-server"
+WEBUI_CONTAINER="open-webui"
 
 # -------------------------------
-# Create required directories
+# CHECK DOCKER
 # -------------------------------
-echo "📁 Creating required directories..."
+if ! command -v docker &> /dev/null
+then
+    echo "🐳 Docker not found. Installing..."
+    sudo apt update
+    sudo apt install -y docker.io
+    sudo systemctl enable docker
+    sudo systemctl start docker
+    sudo usermod -aG docker $USER
+
+    echo "⚠️ Docker installed. Please logout/login and rerun the script."
+    exit 1
+fi
+
+# -------------------------------
+# CHECK NVIDIA RUNTIME
+# -------------------------------
+if ! docker info | grep -q "nvidia"; then
+    echo "⚠️ NVIDIA runtime not detected!"
+    echo "Make sure Jetson is properly configured with NVIDIA Container Runtime."
+fi
+
+# -------------------------------
+# SYSTEM INFO (DEBUG FRIENDLY)
+# -------------------------------
+echo "📊 System Info:"
+free -h || true
+
+# -------------------------------
+# CREATE DIRECTORIES
+# -------------------------------
+echo "📁 Preparing directories..."
 mkdir -p "$HF_CACHE_DIR"
 mkdir -p "$WEBUI_DATA_DIR"
 
 # -------------------------------
-# Cleanup old containers
+# CLEANUP OLD CONTAINERS
 # -------------------------------
-echo "🧹 Cleaning up old containers..."
-
-if [ "$(docker ps -aq -f name=$LLAMA_CONTAINER_NAME)" ]; then
-    docker rm -f $LLAMA_CONTAINER_NAME
-fi
-
-if [ "$(docker ps -aq -f name=$WEBUI_CONTAINER_NAME)" ]; then
-    docker rm -f $WEBUI_CONTAINER_NAME
-fi
+echo "🧹 Cleaning old containers..."
+docker rm -f $LLAMA_CONTAINER 2>/dev/null || true
+docker rm -f $WEBUI_CONTAINER 2>/dev/null || true
 
 # -------------------------------
-# Start Gemma 4 LLM server
+# START LLAMA SERVER
 # -------------------------------
-echo "🧠 Starting Gemma 4 (llama.cpp server)..."
+echo "🧠 Starting Gemma 4 server..."
 
 docker run -d \
-    --name $LLAMA_CONTAINER_NAME \
+    --name $LLAMA_CONTAINER \
     --runtime=nvidia \
     --network host \
     -v $HF_CACHE_DIR:/root/.cache/huggingface \
     $LLAMA_IMAGE \
     llama-server -hf ggml-org/gemma-4-31B-it-GGUF:Q4_K_M
 
-echo "✅ Gemma 4 server started"
+# -------------------------------
+# WAIT FOR MODEL SERVER (REAL CHECK)
+# -------------------------------
+echo "⏳ Waiting for model API..."
+
+for i in {1..60}; do
+    if curl -s http://127.0.0.1:8080/v1/models | grep -q "data"; then
+        echo "✅ Model API is ready!"
+        break
+    fi
+    sleep 2
+done
 
 # -------------------------------
-# Start Open WebUI
+# START OPEN WEBUI (AUTO CONFIG)
 # -------------------------------
 echo "🌐 Starting Open WebUI..."
 
 docker run -d \
-    --name $WEBUI_CONTAINER_NAME \
+    --name $WEBUI_CONTAINER \
     --network host \
     -v $WEBUI_DATA_DIR:/app/backend/data \
-    -e OLLAMA_BASE_URL=http://127.0.0.1:11434 \
     -e PORT=3000 \
+    -e OPENAI_API_BASE_URL=http://127.0.0.1:8080/v1 \
+    -e OPENAI_API_KEY=none \
     $WEBUI_IMAGE
 
-echo "✅ Open WebUI started"
-
 # -------------------------------
-# Final Output
+# FINAL OUTPUT
 # -------------------------------
 echo ""
 echo "🎉 Setup Complete!"
-echo "--------------------------------------"
-echo "🧠 Gemma 4 Server: running in background"
-echo "🌐 Open WebUI:     http://localhost:3000"
+echo "----------------------------------------"
+echo "🌐 Open WebUI: http://localhost:3000"
+echo "🧠 Gemma 4 API: http://127.0.0.1:8080/v1"
 echo ""
-echo "📌 Notes:"
-echo "- First run will take time (model download)"
-echo "- Make sure NVIDIA runtime is properly installed"
-echo "- Configure Open WebUI manually to point to llama.cpp if needed"
-echo "--------------------------------------"
+echo "💡 If model doesn't show:"
+echo "   Go to Settings → Connections → Add OpenAI endpoint"
+echo "   URL: http://127.0.0.1:8080/v1"
+echo "----------------------------------------"
+
+# -------------------------------
+# OPTIONAL: ATTACH LOGS
+# -------------------------------
+if [ "$1" == "--attach" ]; then
+    echo "📜 Attaching logs..."
+    docker logs -f $LLAMA_CONTAINER
+fi
